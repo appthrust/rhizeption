@@ -60,19 +60,23 @@ type HnMachineReconciler struct {
 // move the current state of the cluster closer to the desired state.
 func (r *HnMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	logger := log.FromContext(ctx)
+	logger.Info("Starting reconciliation")
 
 	// Fetch the HnMachine instance
 	hnMachine := &hnv1alpha1.HnMachine{}
 	if err := r.Get(ctx, req.NamespacedName, hnMachine); err != nil {
 		if apierrors.IsNotFound(err) {
+			logger.Info("HnMachine resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
+		logger.Error(err, "Failed to get HnMachine")
 		return ctrl.Result{}, err
 	}
 
 	// Fetch the Machine
 	machine, err := util.GetOwnerMachine(ctx, r.Client, hnMachine.ObjectMeta)
 	if err != nil {
+		logger.Error(err, "Failed to get owner Machine")
 		return ctrl.Result{}, err
 	}
 	if machine == nil {
@@ -93,16 +97,18 @@ func (r *HnMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	// logger = logger.WithValues("cluster", cluster.Name)
+	logger = logger.WithValues("cluster", cluster.Name)
 
 	// Initialize the patch helper
 	patchHelper, err := patch.NewHelper(hnMachine, r.Client)
 	if err != nil {
+		logger.Error(err, "Failed to initialize patch helper")
 		return ctrl.Result{}, err
 	}
 	// Always attempt to Patch the HnMachine object and status after each reconciliation.
 	defer func() {
 		if err := patchHelper.Patch(ctx, hnMachine); err != nil {
+			logger.Error(err, "Failed to patch HnMachine")
 			reterr = kerrors.NewAggregate([]error{reterr, err})
 		}
 	}()
@@ -110,15 +116,18 @@ func (r *HnMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Add finalizer first if not exist to avoid the race condition between init and delete
 	if !controllerutil.ContainsFinalizer(hnMachine, hnv1alpha1.MachineFinalizer) {
 		controllerutil.AddFinalizer(hnMachine, hnv1alpha1.MachineFinalizer)
+		logger.Info("Added finalizer to HnMachine")
 		return ctrl.Result{}, nil
 	}
 
 	// Handle deleted machines
 	if !hnMachine.ObjectMeta.DeletionTimestamp.IsZero() {
+		logger.Info("HnMachine is being deleted")
 		return r.reconcileDelete(ctx, hnMachine)
 	}
 
 	// Handle non-deleted machines
+	logger.Info("Reconciling HnMachine")
 	return r.reconcileNormal(ctx, hnMachine, machine, cluster)
 }
 
@@ -142,6 +151,7 @@ func (r *HnMachineReconciler) reconcileNormal(ctx context.Context, hnMachine *hn
 
 	// Create or update the container
 	if err := r.reconcileContainer(ctx, hnMachine); err != nil {
+		logger.Error(err, "Failed to reconcile container")
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile container")
 	}
 
@@ -161,6 +171,7 @@ func (r *HnMachineReconciler) reconcileNormal(ctx context.Context, hnMachine *hn
 		hnMachine.Spec.ProviderID = r.getProviderID(hnMachine)
 	}
 
+	logger.Info("Successfully reconciled HnMachine")
 	return ctrl.Result{}, nil
 }
 
@@ -170,36 +181,49 @@ func (r *HnMachineReconciler) reconcileDelete(ctx context.Context, hnMachine *hn
 
 	// Delete the container
 	if err := r.deleteContainer(ctx, hnMachine); err != nil {
+		logger.Error(err, "Failed to delete container")
 		return ctrl.Result{}, errors.Wrap(err, "failed to delete container")
 	}
 
 	// Container is deleted so remove the finalizer.
 	controllerutil.RemoveFinalizer(hnMachine, hnv1alpha1.MachineFinalizer)
 
+	logger.Info("Successfully deleted HnMachine")
 	return ctrl.Result{}, nil
 }
 
 func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine *hnv1alpha1.HnMachine) error {
 	log := log.FromContext(ctx)
+	log.Info("Reconciling container for HnMachine", "hnMachine", hnMachine.Name)
 
-	// 1. Podの存在確認
-	pod := &corev1.Pod{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: hnMachine.Namespace, Name: hnMachine.Name}, pod)
-	if err != nil && !apierrors.IsNotFound(err) {
-		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "FailedToGetPod", clusterv1.ConditionSeverityError, err.Error())
-		return err
+	// Check if bootstrap data is available
+	if hnMachine.Spec.Bootstrap.DataSecretName == nil {
+		log.Info("Bootstrap data is not available yet", "hnMachine", hnMachine.Name)
+		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "WaitingForBootstrapData", clusterv1.ConditionSeverityInfo, "Bootstrap data is not available yet")
+		return nil
 	}
 
-	if apierrors.IsNotFound(err) {
-		// 2. Podが存在しない場合、新しいPodを作成
-		log.Info("Creating new Pod for HnMachine", "hnMachine", hnMachine.Name)
+	// 1. Check if the Pod exists
+	pod := &corev1.Pod{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: hnMachine.Namespace, Name: hnMachine.Name}, pod)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			log.Error(err, "Failed to get Pod")
+			conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "FailedToGetPod", clusterv1.ConditionSeverityError, err.Error())
+			return err
+		}
+		log.Info("Pod not found, creating a new one", "hnMachine", hnMachine.Name)
+		// 2. If the Pod doesn't exist, create a new one
 		pod, err = r.createPodForHnMachine(ctx, hnMachine)
 		if err != nil {
+			log.Error(err, "Failed to create Pod")
 			conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "FailedToCreatePod", clusterv1.ConditionSeverityError, err.Error())
 			return err
 		}
+		log.Info("Successfully created Pod for HnMachine", "hnMachine", hnMachine.Name, "pod", pod.Name)
 	} else {
-		// 3. Podが存在する場合、更新が必要かチェック
+		log.Info("Pod already exists, checking if update is needed", "hnMachine", hnMachine.Name, "pod", pod.Name)
+		// 3. If the Pod exists, check if an update is needed
 		updateRequired, significantChange := r.shouldUpdatePod(hnMachine, pod)
 		if updateRequired {
 			if significantChange {
@@ -209,13 +233,18 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 			}
 			log.Info("Updating existing Pod for HnMachine", "hnMachine", hnMachine.Name)
 			if err := r.updatePod(ctx, hnMachine, pod); err != nil {
+				log.Error(err, "Failed to update Pod")
 				conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "FailedToUpdatePod", clusterv1.ConditionSeverityError, err.Error())
 				return err
 			}
+			log.Info("Successfully updated Pod for HnMachine", "hnMachine", hnMachine.Name, "pod", pod.Name)
+		} else {
+			log.Info("No update needed for Pod", "hnMachine", hnMachine.Name, "pod", pod.Name)
 		}
 	}
 
-	// 4. Podの状態を確認
+	// 4. Check the Pod status
+	log.Info("Checking Pod status", "hnMachine", hnMachine.Name, "pod", pod.Name, "podPhase", pod.Status.Phase)
 	if pod.Status.Phase == corev1.PodRunning {
 		hnMachine.Status.Ready = true
 		hnMachine.Status.Addresses = []clusterv1.MachineAddress{
@@ -229,18 +258,24 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 			},
 		}
 		conditions.MarkTrue(hnMachine, hnv1alpha1.ContainerProvisionedCondition)
+		log.Info("Pod is running, HnMachine is ready", "hnMachine", hnMachine.Name, "pod", pod.Name)
 	} else {
 		hnMachine.Status.Ready = false
 		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "PodNotRunning", clusterv1.ConditionSeverityWarning, fmt.Sprintf("Pod is in %s state", pod.Status.Phase))
+		log.Info("Pod is not running", "hnMachine", hnMachine.Name, "pod", pod.Name, "podPhase", pod.Status.Phase)
 	}
 
 	return nil
 }
 
 func (r *HnMachineReconciler) createPodForHnMachine(ctx context.Context, hnMachine *hnv1alpha1.HnMachine) (*corev1.Pod, error) {
+	log := log.FromContext(ctx)
+	log.Info("Creating Pod for HnMachine", "hnMachine", hnMachine.Name)
+
 	// Get the bootstrap data Secret
 	bootstrapSecret := &corev1.Secret{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: hnMachine.Namespace, Name: *hnMachine.Spec.Bootstrap.DataSecretName}, bootstrapSecret); err != nil {
+		log.Error(err, "Failed to get bootstrap data secret")
 		return nil, fmt.Errorf("failed to get bootstrap data secret: %w", err)
 	}
 
@@ -286,9 +321,11 @@ func (r *HnMachineReconciler) createPodForHnMachine(ctx context.Context, hnMachi
 
 	// Create the Pod
 	if err := r.Create(ctx, pod); err != nil {
+		log.Error(err, "Failed to create Pod", "pod", pod)
 		return nil, fmt.Errorf("failed to create Pod: %w", err)
 	}
 
+	log.Info("Successfully created Pod for HnMachine", "hnMachine", hnMachine.Name, "pod", pod.Name)
 	return pod, nil
 }
 
