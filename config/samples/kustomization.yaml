@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- hn_v1alpha1_hnmachine.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

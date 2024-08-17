@@ -1,0 +1,27 @@
+# permissions for end users to edit hnmachines.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: capi-provider-hn
+    app.kubernetes.io/managed-by: kustomize
+  name: hnmachine-editor-role
+rules:
+- apiGroups:
+  - hn.appthrust.io
+  resources:
+  - hnmachines
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - hn.appthrust.io
+  resources:
+  - hnmachines/status
+  verbs:
+  - get

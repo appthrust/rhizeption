@@ -1,0 +1,9 @@
+apiVersion: hn.appthrust.io/v1alpha1
+kind: HnMachine
+metadata:
+  labels:
+    app.kubernetes.io/name: capi-provider-hn
+    app.kubernetes.io/managed-by: kustomize
+  name: hnmachine-sample
+spec:
+  # TODO(user): Add fields here
