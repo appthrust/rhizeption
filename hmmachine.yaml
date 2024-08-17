@@ -1,0 +1,93 @@
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: sample-cluster
+  namespace: default
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks: ["192.168.0.0/16"]
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: DockerCluster
+    name: sample-docker-cluster
+
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: DockerCluster
+metadata:
+  name: sample-docker-cluster
+  namespace: default
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sample-bootstrap-data
+  namespace: default
+type: cluster.x-k8s.io/secret
+stringData:
+  value: |
+    #!/bin/bash
+    echo "Initializing HnMachine node..."
+    kubeadm join 192.168.1.100:6443 --token abcdef.0123456789abcdef --discovery-token-ca-cert-hash sha256:1234...cdef
+    echo "HnMachine node initialization completed."
+
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: sample-machine
+  namespace: default
+  labels:
+    cluster.x-k8s.io/cluster-name: sample-cluster
+spec:
+  clusterName: sample-cluster
+  bootstrap:
+    dataSecretName: sample-bootstrap-data
+  infrastructureRef:
+    apiVersion: hn.appthrust.io/v1alpha1
+    kind: HnMachine
+    name: sample-hnmachine
+  version: v1.28.3
+
+---
+apiVersion: hn.appthrust.io/v1alpha1
+kind: HnMachine
+metadata:
+  name: sample-hnmachine
+  namespace: default
+  ownerReferences:
+  - apiVersion: cluster.x-k8s.io/v1beta1
+    kind: Machine
+    name: sample-machine
+    uid: 11111111-2222-3333-4444-555555555555
+    controller: true
+    blockOwnerDeletion: true
+spec:
+  template:
+    image: "ubuntu:20.04"
+    command: ["/bin/bash", "-c"]
+    args: ["echo 'HnMachine is running'; sleep infinity"]
+    env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    volumeMounts:
+      - name: kubelet-dir
+        mountPath: /var/lib/kubelet
+    securityContext:
+      privileged: true
+  bootstrap:
+    dataSecretName: "sample-bootstrap-data"
+  bootstrapCheckSpec:
+    checkStrategy: exec

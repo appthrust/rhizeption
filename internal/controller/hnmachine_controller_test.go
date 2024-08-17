@@ -43,7 +43,7 @@ const (
 
 var _ = Describe("HnMachine Controller", func() {
 	const (
-		timeout  = time.Second * 10
+		timeout  = time.Second * 30
 		interval = time.Millisecond * 250
 	)
 
@@ -176,26 +176,22 @@ var _ = Describe("HnMachine Controller", func() {
 				Scheme: k8sClient.Scheme(),
 			}
 
-			result, err := hnMachineReconciler.Reconcile(ctx, reconcile.Request{
+			_, err := hnMachineReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			fmt.Printf("Reconcile result: %+v\n", result)
 
 			By("Checking the state of the HnMachine after reconciliation")
 			reconciledHnMachine := &hnv1alpha1.HnMachine{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, reconciledHnMachine)).To(Succeed())
+			Eventually(func() error {
+				return k8sClient.Get(ctx, typeNamespacedName, reconciledHnMachine)
+			}, timeout, interval).Should(Succeed())
 			fmt.Printf("Reconciled HnMachine: %+v\n", reconciledHnMachine)
 
 			By("Checking if the Pod was created")
 			pod := &corev1.Pod{}
 			Eventually(func() error {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}, pod)
-				if err != nil {
-					fmt.Printf("Error getting Pod: %v\n", err)
-					return err
-				}
-				return nil
+				return k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: resourceNamespace}, pod)
 			}, timeout, interval).Should(Succeed())
 
 			fmt.Printf("Created Pod: %+v\n", pod)

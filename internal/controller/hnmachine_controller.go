@@ -73,6 +73,34 @@ func (r *HnMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
+	// Initialize the patch helper
+	patchHelper, err := patch.NewHelper(hnMachine, r.Client)
+	if err != nil {
+		logger.Error(err, "Failed to initialize patch helper")
+		return ctrl.Result{}, err
+	}
+
+	// Always attempt to Patch the HnMachine object and status after each reconciliation.
+	defer func() {
+		if err := patchHelper.Patch(ctx, hnMachine); err != nil {
+			logger.Error(err, "Failed to patch HnMachine")
+			reterr = kerrors.NewAggregate([]error{reterr, err})
+		}
+	}()
+
+	// Add finalizer first if not exist to avoid the race condition between init and delete
+	if !controllerutil.ContainsFinalizer(hnMachine, hnv1alpha1.MachineFinalizer) {
+		controllerutil.AddFinalizer(hnMachine, hnv1alpha1.MachineFinalizer)
+		logger.Info("Added finalizer to HnMachine")
+		return ctrl.Result{}, nil
+	}
+
+	// Handle deleted machines
+	if !hnMachine.ObjectMeta.DeletionTimestamp.IsZero() {
+		logger.Info("HnMachine is being deleted")
+		return r.reconcileDelete(ctx, hnMachine)
+	}
+
 	// Fetch the Machine
 	machine, err := util.GetOwnerMachine(ctx, r.Client, hnMachine.ObjectMeta)
 	if err != nil {
@@ -99,33 +127,6 @@ func (r *HnMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	logger = logger.WithValues("cluster", cluster.Name)
 
-	// Initialize the patch helper
-	patchHelper, err := patch.NewHelper(hnMachine, r.Client)
-	if err != nil {
-		logger.Error(err, "Failed to initialize patch helper")
-		return ctrl.Result{}, err
-	}
-	// Always attempt to Patch the HnMachine object and status after each reconciliation.
-	defer func() {
-		if err := patchHelper.Patch(ctx, hnMachine); err != nil {
-			logger.Error(err, "Failed to patch HnMachine")
-			reterr = kerrors.NewAggregate([]error{reterr, err})
-		}
-	}()
-
-	// Add finalizer first if not exist to avoid the race condition between init and delete
-	if !controllerutil.ContainsFinalizer(hnMachine, hnv1alpha1.MachineFinalizer) {
-		controllerutil.AddFinalizer(hnMachine, hnv1alpha1.MachineFinalizer)
-		logger.Info("Added finalizer to HnMachine")
-		return ctrl.Result{}, nil
-	}
-
-	// Handle deleted machines
-	if !hnMachine.ObjectMeta.DeletionTimestamp.IsZero() {
-		logger.Info("HnMachine is being deleted")
-		return r.reconcileDelete(ctx, hnMachine)
-	}
-
 	// Handle non-deleted machines
 	logger.Info("Reconciling HnMachine")
 	return r.reconcileNormal(ctx, hnMachine, machine, cluster)
@@ -150,28 +151,35 @@ func (r *HnMachineReconciler) reconcileNormal(ctx context.Context, hnMachine *hn
 	}
 
 	// Create or update the container
-	if err := r.reconcileContainer(ctx, hnMachine); err != nil {
+	pod, err := r.reconcileContainer(ctx, hnMachine)
+	if err != nil {
 		logger.Error(err, "Failed to reconcile container")
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile container")
 	}
 
-	hnMachine.Status.Ready = true
-	hnMachine.Status.Addresses = []clusterv1.MachineAddress{
-		{
-			Type:    clusterv1.MachineHostName,
-			Address: hnMachine.Name,
-		},
-		{
-			Type:    clusterv1.MachineInternalIP,
-			Address: "localhost", // This should be updated with the actual IP
-		},
+	if pod != nil && pod.Status.Phase == corev1.PodRunning {
+		hnMachine.Status.Ready = true
+		hnMachine.Status.Addresses = []clusterv1.MachineAddress{
+			{
+				Type:    clusterv1.MachineHostName,
+				Address: pod.Spec.NodeName,
+			},
+			{
+				Type:    clusterv1.MachineInternalIP,
+				Address: pod.Status.PodIP,
+			},
+		}
+
+		if hnMachine.Spec.ProviderID == nil {
+			hnMachine.Spec.ProviderID = r.getProviderID(hnMachine)
+		}
+
+		logger.Info("Successfully reconciled HnMachine", "hnMachine", hnMachine.Name, "pod", pod.Name)
+	} else {
+		hnMachine.Status.Ready = false
+		logger.Info("HnMachine not ready", "hnMachine", hnMachine.Name, "podPhase", pod.Status.Phase)
 	}
 
-	if hnMachine.Spec.ProviderID == nil {
-		hnMachine.Spec.ProviderID = r.getProviderID(hnMachine)
-	}
-
-	logger.Info("Successfully reconciled HnMachine")
 	return ctrl.Result{}, nil
 }
 
@@ -192,7 +200,7 @@ func (r *HnMachineReconciler) reconcileDelete(ctx context.Context, hnMachine *hn
 	return ctrl.Result{}, nil
 }
 
-func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine *hnv1alpha1.HnMachine) error {
+func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine *hnv1alpha1.HnMachine) (*corev1.Pod, error) {
 	log := log.FromContext(ctx)
 	log.Info("Reconciling container for HnMachine", "hnMachine", hnMachine.Name)
 
@@ -200,7 +208,7 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 	if hnMachine.Spec.Bootstrap.DataSecretName == nil {
 		log.Info("Bootstrap data is not available yet", "hnMachine", hnMachine.Name)
 		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "WaitingForBootstrapData", clusterv1.ConditionSeverityInfo, "Bootstrap data is not available yet")
-		return nil
+		return nil, nil
 	}
 
 	// 1. Check if the Pod exists
@@ -210,7 +218,7 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 		if !apierrors.IsNotFound(err) {
 			log.Error(err, "Failed to get Pod")
 			conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "FailedToGetPod", clusterv1.ConditionSeverityError, err.Error())
-			return err
+			return nil, err
 		}
 		log.Info("Pod not found, creating a new one", "hnMachine", hnMachine.Name)
 		// 2. If the Pod doesn't exist, create a new one
@@ -218,7 +226,7 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 		if err != nil {
 			log.Error(err, "Failed to create Pod")
 			conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "FailedToCreatePod", clusterv1.ConditionSeverityError, err.Error())
-			return err
+			return nil, err
 		}
 		log.Info("Successfully created Pod for HnMachine", "hnMachine", hnMachine.Name, "pod", pod.Name)
 	} else {
@@ -229,13 +237,13 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 			if significantChange {
 				log.Info("Significant changes detected, update required but not performed", "hnMachine", hnMachine.Name)
 				conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "SignificantChangesDetected", clusterv1.ConditionSeverityWarning, "Significant changes detected, new Machine may be required")
-				return nil
+				return nil, nil
 			}
 			log.Info("Updating existing Pod for HnMachine", "hnMachine", hnMachine.Name)
 			if err := r.updatePod(ctx, hnMachine, pod); err != nil {
 				log.Error(err, "Failed to update Pod")
 				conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "FailedToUpdatePod", clusterv1.ConditionSeverityError, err.Error())
-				return err
+				return nil, err
 			}
 			log.Info("Successfully updated Pod for HnMachine", "hnMachine", hnMachine.Name, "pod", pod.Name)
 		} else {
@@ -243,29 +251,24 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 		}
 	}
 
-	// 4. Check the Pod status
-	log.Info("Checking Pod status", "hnMachine", hnMachine.Name, "pod", pod.Name, "podPhase", pod.Status.Phase)
-	if pod.Status.Phase == corev1.PodRunning {
-		hnMachine.Status.Ready = true
-		hnMachine.Status.Addresses = []clusterv1.MachineAddress{
-			{
-				Type:    clusterv1.MachineHostName,
-				Address: pod.Spec.NodeName,
-			},
-			{
-				Type:    clusterv1.MachineInternalIP,
-				Address: pod.Status.PodIP,
-			},
+	// Wait for the Pod to be running
+	err = wait.PollImmediate(time.Second, time.Minute*5, func() (bool, error) {
+		if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: pod.Name}, pod); err != nil {
+			return false, err
 		}
-		conditions.MarkTrue(hnMachine, hnv1alpha1.ContainerProvisionedCondition)
-		log.Info("Pod is running, HnMachine is ready", "hnMachine", hnMachine.Name, "pod", pod.Name)
-	} else {
-		hnMachine.Status.Ready = false
-		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "PodNotRunning", clusterv1.ConditionSeverityWarning, fmt.Sprintf("Pod is in %s state", pod.Status.Phase))
-		log.Info("Pod is not running", "hnMachine", hnMachine.Name, "pod", pod.Name, "podPhase", pod.Status.Phase)
+		return pod.Status.Phase == corev1.PodRunning, nil
+	})
+
+	if err != nil {
+		log.Error(err, "Pod did not reach Running state", "hnMachine", hnMachine.Name, "pod", pod.Name)
+		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "PodNotRunning", clusterv1.ConditionSeverityWarning, "Pod did not reach Running state")
+		return nil, err
 	}
 
-	return nil
+	log.Info("Pod is running", "hnMachine", hnMachine.Name, "pod", pod.Name)
+	conditions.MarkTrue(hnMachine, hnv1alpha1.ContainerProvisionedCondition)
+
+	return pod, nil
 }
 
 func (r *HnMachineReconciler) createPodForHnMachine(ctx context.Context, hnMachine *hnv1alpha1.HnMachine) (*corev1.Pod, error) {
