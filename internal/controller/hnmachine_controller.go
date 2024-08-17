@@ -182,7 +182,7 @@ func (r *HnMachineReconciler) reconcileDelete(ctx context.Context, hnMachine *hn
 func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine *hnv1alpha1.HnMachine) error {
 	log := log.FromContext(ctx)
 
-	// 1. Check if the Pod exists
+	// 1. Podの存在確認
 	pod := &corev1.Pod{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: hnMachine.Namespace, Name: hnMachine.Name}, pod)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -191,7 +191,7 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 	}
 
 	if apierrors.IsNotFound(err) {
-		// 2. If the Pod doesn't exist, create a new Pod
+		// 2. Podが存在しない場合、新しいPodを作成
 		log.Info("Creating new Pod for HnMachine", "hnMachine", hnMachine.Name)
 		pod, err = r.createPodForHnMachine(ctx, hnMachine)
 		if err != nil {
@@ -199,16 +199,14 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 			return err
 		}
 	} else {
-		// 3. If the Pod exists, check if an update is needed
+		// 3. Podが存在する場合、更新が必要かチェック
 		updateRequired, significantChange := r.shouldUpdatePod(hnMachine, pod)
 		if updateRequired {
 			if significantChange {
-				// If there are significant changes, report the status but don't perform the update
 				log.Info("Significant changes detected, update required but not performed", "hnMachine", hnMachine.Name)
 				conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "SignificantChangesDetected", clusterv1.ConditionSeverityWarning, "Significant changes detected, new Machine may be required")
 				return nil
 			}
-			// Only perform the update for minor changes
 			log.Info("Updating existing Pod for HnMachine", "hnMachine", hnMachine.Name)
 			if err := r.updatePod(ctx, hnMachine, pod); err != nil {
 				conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "FailedToUpdatePod", clusterv1.ConditionSeverityError, err.Error())
@@ -217,9 +215,8 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 		}
 	}
 
-	// 4. Check the Pod's status
+	// 4. Podの状態を確認
 	if pod.Status.Phase == corev1.PodRunning {
-		// If the Pod is running, update the HnMachine status
 		hnMachine.Status.Ready = true
 		hnMachine.Status.Addresses = []clusterv1.MachineAddress{
 			{
@@ -233,7 +230,6 @@ func (r *HnMachineReconciler) reconcileContainer(ctx context.Context, hnMachine 
 		}
 		conditions.MarkTrue(hnMachine, hnv1alpha1.ContainerProvisionedCondition)
 	} else {
-		// If the Pod is not running yet, update the status
 		hnMachine.Status.Ready = false
 		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "PodNotRunning", clusterv1.ConditionSeverityWarning, fmt.Sprintf("Pod is in %s state", pod.Status.Phase))
 	}
@@ -248,23 +244,30 @@ func (r *HnMachineReconciler) createPodForHnMachine(ctx context.Context, hnMachi
 		return nil, fmt.Errorf("failed to get bootstrap data secret: %w", err)
 	}
 
-	// Copy the PodSpec
-	podSpec := hnMachine.Spec.Template.Spec.DeepCopy()
+	// Create the container spec
+	container := corev1.Container{
+		Name:            "hnmachine",
+		Image:           hnMachine.Spec.Template.Image,
+		Command:         hnMachine.Spec.Template.Command,
+		Args:            hnMachine.Spec.Template.Args,
+		Env:             hnMachine.Spec.Template.Env,
+		Resources:       hnMachine.Spec.Template.Resources,
+		VolumeMounts:    hnMachine.Spec.Template.VolumeMounts,
+		SecurityContext: hnMachine.Spec.Template.SecurityContext,
+	}
 
 	// Add bootstrap data as an environment variable
-	for i := range podSpec.Containers {
-		podSpec.Containers[i].Env = append(podSpec.Containers[i].Env, corev1.EnvVar{
-			Name: "BOOTSTRAP_DATA",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: bootstrapSecret.Name,
-					},
-					Key: "value",
+	container.Env = append(container.Env, corev1.EnvVar{
+		Name: "BOOTSTRAP_DATA",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: bootstrapSecret.Name,
 				},
+				Key: "value",
 			},
-		})
-	}
+		},
+	})
 
 	// Pod definition
 	pod := &corev1.Pod{
@@ -276,7 +279,9 @@ func (r *HnMachineReconciler) createPodForHnMachine(ctx context.Context, hnMachi
 				"hnmachine": hnMachine.Name,
 			},
 		},
-		Spec: *podSpec,
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{container},
+		},
 	}
 
 	// Create the Pod
@@ -288,58 +293,63 @@ func (r *HnMachineReconciler) createPodForHnMachine(ctx context.Context, hnMachi
 }
 
 func (r *HnMachineReconciler) shouldUpdatePod(hnMachine *hnv1alpha1.HnMachine, pod *corev1.Pod) (updateRequired bool, significantChange bool) {
+	if len(pod.Spec.Containers) == 0 {
+		return true, true
+	}
+
+	containerSpec := hnMachine.Spec.Template
+	podContainer := pod.Spec.Containers[0]
+
 	// 1. Check for minor changes
-	if !reflect.DeepEqual(hnMachine.Spec.Template.Labels, pod.Labels) ||
-		!reflect.DeepEqual(hnMachine.Spec.Template.Annotations, pod.Annotations) {
+	if !reflect.DeepEqual(pod.Labels, map[string]string{"app": "hnmachine", "hnmachine": hnMachine.Name}) {
 		return true, false
 	}
 
 	// 2. Check for minor changes in resource requests and limits
-	for i, containerSpec := range hnMachine.Spec.Template.Spec.Containers {
-		if i < len(pod.Spec.Containers) {
-			podContainer := pod.Spec.Containers[i]
-			if !areResourcesEqual(containerSpec.Resources, podContainer.Resources) {
-				return true, false
-			}
-		}
+	if !areResourcesEqual(containerSpec.Resources, podContainer.Resources) {
+		return true, false
 	}
 
 	// 3. Check for changes in environment variables (excluding BOOTSTRAP_DATA)
-	if !areEnvVarsEqual(hnMachine.Spec.Template.Spec.Containers, pod.Spec.Containers) {
+	if !areEnvVarsEqual(containerSpec.Env, podContainer.Env) {
 		return true, false
 	}
 
 	// 4. Check for significant changes
-	if !reflect.DeepEqual(hnMachine.Spec.Template.Spec.Containers, pod.Spec.Containers) ||
-		!reflect.DeepEqual(hnMachine.Spec.Template.Spec.Volumes, pod.Spec.Volumes) ||
-		!reflect.DeepEqual(hnMachine.Spec.Template.Spec.NodeSelector, pod.Spec.NodeSelector) ||
-		!reflect.DeepEqual(hnMachine.Spec.Template.Spec.Affinity, pod.Spec.Affinity) ||
-		!reflect.DeepEqual(hnMachine.Spec.Template.Spec.Tolerations, pod.Spec.Tolerations) {
+	if containerSpec.Image != podContainer.Image ||
+		!reflect.DeepEqual(containerSpec.Command, podContainer.Command) ||
+		!reflect.DeepEqual(containerSpec.Args, podContainer.Args) ||
+		!reflect.DeepEqual(containerSpec.VolumeMounts, podContainer.VolumeMounts) ||
+		!reflect.DeepEqual(containerSpec.SecurityContext, podContainer.SecurityContext) {
 		return true, true
 	}
 
 	return false, false
 }
 
-// Helper function to tolerate minor changes in resources
-func areResourcesEqual(spec, current corev1.ResourceRequirements) bool {
-	resourceNames := []corev1.ResourceName{
-		corev1.ResourceCPU,
-		corev1.ResourceMemory,
-	}
+// Helper function to compare resources
+func areResourcesEqual(a, b corev1.ResourceRequirements) bool {
+	return reflect.DeepEqual(a.Requests, b.Requests) && reflect.DeepEqual(a.Limits, b.Limits)
+}
 
-	for _, name := range resourceNames {
-		if !spec.Requests[name].Equal(current.Requests[name]) ||
-			!spec.Limits[name].Equal(current.Limits[name]) {
-			// Tolerate changes within 10%
-			if isWithinTolerance(spec.Requests[name], current.Requests[name], 0.1) &&
-				isWithinTolerance(spec.Limits[name], current.Limits[name], 0.1) {
-				continue
-			}
-			return false
+// Helper function to compare environment variables
+func areEnvVarsEqual(a, b []corev1.EnvVar) bool {
+	aMap := make(map[string]string)
+	bMap := make(map[string]string)
+
+	for _, env := range a {
+		if env.Name != "BOOTSTRAP_DATA" {
+			aMap[env.Name] = env.Value
 		}
 	}
-	return true
+
+	for _, env := range b {
+		if env.Name != "BOOTSTRAP_DATA" {
+			bMap[env.Name] = env.Value
+		}
+	}
+
+	return reflect.DeepEqual(aMap, bMap)
 }
 
 // Helper function to check if a value change is within the specified tolerance
@@ -355,36 +365,6 @@ func isWithinTolerance(a, b resource.Quantity, tolerance float64) bool {
 	diff := math.Abs(aFloat - bFloat)
 	average := (aFloat + bFloat) / 2
 	return (diff / average) <= tolerance
-}
-
-// Helper function to check for changes in environment variables
-func areEnvVarsEqual(specContainers, podContainers []corev1.Container) bool {
-	for i, specContainer := range specContainers {
-		if i < len(podContainers) {
-			podContainer := podContainers[i]
-			specEnvMap := makeEnvMap(specContainer.Env)
-			podEnvMap := makeEnvMap(podContainer.Env)
-
-			for key, specValue := range specEnvMap {
-				if key == "BOOTSTRAP_DATA" {
-					continue
-				}
-				if podValue, exists := podEnvMap[key]; !exists || specValue != podValue {
-					return false
-				}
-			}
-
-			for key := range podEnvMap {
-				if key == "BOOTSTRAP_DATA" {
-					continue
-				}
-				if _, exists := specEnvMap[key]; !exists {
-					return false
-				}
-			}
-		}
-	}
-	return true
 }
 
 // Helper function to convert environment variables to a map

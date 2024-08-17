@@ -34,13 +34,14 @@ const (
 	WaitingForClusterInfrastructureReason = "WaitingForClusterInfrastructure"
 )
 
+// HnMachineSpec defines the desired state of HnMachine
 type HnMachineSpec struct {
 	// ProviderID is the identifier for the HnMachine instance
 	// +optional
 	ProviderID *string `json:"providerID,omitempty"`
 
-	// Template defines the desired state of the Pod
-	Template HnMachinePodTemplate `json:"template"`
+	// Template defines the desired state of the Container
+	Template HnMachineContainerTemplate `json:"template"`
 
 	// Bootstrap specifies the bootstrap configuration for this machine.
 	Bootstrap clusterv1.Bootstrap `json:"bootstrap"`
@@ -54,16 +55,34 @@ type HnMachineSpec struct {
 	InfraClusterSecretRef *corev1.ObjectReference `json:"infraClusterSecretRef,omitempty"`
 }
 
-type HnMachinePodTemplate struct {
-	// Standard object's metadata.
-	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
-	// +optional
-	metav1.ObjectMeta `json:"metadata,omitempty"`
+// HnMachineContainerTemplate defines the core settings for the HnMachine container
+type HnMachineContainerTemplate struct {
+	// Image is the container image to use
+	Image string `json:"image"`
 
-	// Specification of the desired behavior of the pod.
-	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
+	// Command is the entrypoint array. Not executed within a shell.
 	// +optional
-	Spec corev1.PodSpec `json:"spec,omitempty"`
+	Command []string `json:"command,omitempty"`
+
+	// Args are the arguments to the entrypoint.
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// Env is a list of environment variables to set in the container.
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// Resources are the compute resource requirements.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// VolumeMounts are the volumes to mount into the container's filesystem.
+	// +optional
+	VolumeMounts []corev1.VolumeMount `json:"volumeMounts,omitempty"`
+
+	// SecurityContext holds security configuration that will be applied to the container.
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 }
 
 // BootstrapCheckSpec defines how the controller will remotely check CAPI Sentinel file content.
