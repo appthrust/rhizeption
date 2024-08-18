@@ -15,6 +15,10 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - description: Cluster
+      jsonPath: .spec.clusterName
+      name: Cluster
+      type: string
     - description: Machine ready status
       jsonPath: .status.ready
       name: Ready
@@ -22,6 +26,10 @@ spec:
     - description: Provider ID
       jsonPath: .spec.providerID
       name: ProviderID
+      type: string
+    - description: Machine phase
+      jsonPath: .status.phase
+      name: Phase
       type: string
     - description: Time duration since creation of HnMachine
       jsonPath: .metadata.creationTimestamp
@@ -124,6 +132,19 @@ spec:
                     - exec
                     type: string
                 type: object
+              clusterName:
+                description: ClusterName is the name of the Cluster this object belongs
+                  to.
+                minLength: 1
+                type: string
+              failureDomain:
+                description: |-
+                  FailureDomain is the failure domain the machine will be created in.
+                  Must match a key in the FailureDomains map stored on the cluster object.
+                type: string
+              machineType:
+                description: MachineType is the type of machine to use for this HnMachine
+                type: string
               providerID:
                 description: ProviderID is the identifier for the HnMachine instance
                 type: string
@@ -592,6 +613,7 @@ spec:
                 type: object
             required:
             - bootstrap
+            - clusterName
             - template
             type: object
           status:
@@ -671,6 +693,11 @@ spec:
                   FailureReason will be set in the event that there is a terminal problem
                   reconciling the Machine and will contain a succinct value suitable
                   for machine interpretation.
+                type: string
+              phase:
+                description: |-
+                  Phase represents the current phase of machine actuation.
+                  E.g. Pending, Running, Terminating, Failed etc.
                 type: string
               ready:
                 default: false

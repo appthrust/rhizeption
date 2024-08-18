@@ -1,0 +1,23 @@
+# permissions for end users to view hnclusters.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: capi-provider-hn
+    app.kubernetes.io/managed-by: kustomize
+  name: hncluster-viewer-role
+rules:
+- apiGroups:
+  - hn.appthrust.io
+  resources:
+  - hnclusters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - hn.appthrust.io
+  resources:
+  - hnclusters/status
+  verbs:
+  - get

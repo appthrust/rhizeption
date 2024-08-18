@@ -34,8 +34,18 @@ type HnMachineSpec struct {
 	// +optional
 	BootstrapCheckSpec BootstrapCheckSpec `json:"bootstrapCheckSpec,omitempty"`
 
-	// InfraClusterSecretRef field has been removed as it is no longer needed.
-	// HnMachine operates only within Kubernetes Pods and does not interact directly with external infrastructure.
+	// ClusterName is the name of the Cluster this object belongs to.
+	// +kubebuilder:validation:MinLength=1
+	ClusterName string `json:"clusterName"`
+
+	// FailureDomain is the failure domain the machine will be created in.
+	// Must match a key in the FailureDomains map stored on the cluster object.
+	// +optional
+	FailureDomain *string `json:"failureDomain,omitempty"`
+
+	// MachineType is the type of machine to use for this HnMachine
+	// +optional
+	MachineType string `json:"machineType,omitempty"`
 }
 
 // HnMachineContainerTemplate defines the core settings for the HnMachine container
@@ -66,6 +76,17 @@ type HnMachineContainerTemplate struct {
 	// SecurityContext holds security configuration that will be applied to the container.
 	// +optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+}
+
+// HnMachineTemplateSpec defines the desired state of HnMachineTemplate
+type HnMachineTemplateSpec struct {
+	Template HnMachineTemplateResource `json:"template"`
+}
+
+// HnMachineTemplateResource describes the data needed to create a HnMachine from a template
+type HnMachineTemplateResource struct {
+	// Spec is the specification of the desired behavior of the machine.
+	Spec HnMachineSpec `json:"spec"`
 }
 
 // BootstrapCheckSpec defines how the controller will remotely check CAPI Sentinel file content.
@@ -103,12 +124,19 @@ type HnMachineStatus struct {
 	// for logging and human consumption.
 	// +optional
 	FailureMessage *string `json:"failureMessage,omitempty"`
+
+	// Phase represents the current phase of machine actuation.
+	// E.g. Pending, Running, Terminating, Failed etc.
+	// +optional
+	Phase string `json:"phase,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Cluster",type="string",JSONPath=".spec.clusterName",description="Cluster"
 // +kubebuilder:printcolumn:name="Ready",type="boolean",JSONPath=".status.ready",description="Machine ready status"
 // +kubebuilder:printcolumn:name="ProviderID",type="string",JSONPath=".spec.providerID",description="Provider ID"
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Machine phase"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time duration since creation of HnMachine"
 
 // HnMachine is the Schema for the hnmachines API
@@ -139,6 +167,33 @@ type HnMachineList struct {
 	Items           []HnMachine `json:"items"`
 }
 
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// HnMachineTemplate is the Schema for the hnmachinetemplates API
+type HnMachineTemplate struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec HnMachineTemplateSpec `json:"spec,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// HnMachineTemplateList contains a list of HnMachineTemplate
+type HnMachineTemplateList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []HnMachineTemplate `json:"items"`
+}
+
 func init() {
 	SchemeBuilder.Register(&HnMachine{}, &HnMachineList{})
+}
+
+func init() {
+	SchemeBuilder.Register(&HnMachine{}, &HnMachineList{})
+	SchemeBuilder.Register(&HnMachineTemplate{}, &HnMachineTemplateList{})
 }

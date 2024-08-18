@@ -22,6 +22,8 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the Project itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- hncluster_editor_role.yaml
+- hncluster_viewer_role.yaml
 - hnmachine_editor_role.yaml
 - hnmachine_viewer_role.yaml
 

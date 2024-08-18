@@ -22,14 +22,13 @@ import (
 	"reflect"
 	"time"
 
-	"math"
-
+	hnv1alpha1 "github.com/appthrust/hosted-node/api/v1alpha1"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
@@ -39,9 +38,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	hnv1alpha1 "github.com/appthrust/hosted-node/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // HnMachineReconciler reconciles a HnMachine object
@@ -55,6 +54,7 @@ type HnMachineReconciler struct {
 // +kubebuilder:rbac:groups=hn.appthrust.io,resources=hnmachines/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cluster.x-k8s.io,resources=clusters;machines,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -127,6 +127,11 @@ func (r *HnMachineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	logger = logger.WithValues("cluster", cluster.Name)
 
+	// Update HnMachine's ClusterName if it's not set
+	if hnMachine.Spec.ClusterName == "" {
+		hnMachine.Spec.ClusterName = cluster.Name
+	}
+
 	// Handle non-deleted machines
 	logger.Info("Reconciling HnMachine")
 	return r.reconcileNormal(ctx, hnMachine, machine, cluster)
@@ -141,19 +146,29 @@ func (r *HnMachineReconciler) reconcileNormal(ctx context.Context, hnMachine *hn
 	if !cluster.Status.InfrastructureReady {
 		logger.Info("Cluster infrastructure is not ready yet")
 		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, hnv1alpha1.WaitingForClusterInfrastructureReason, clusterv1.ConditionSeverityInfo, "")
-		return ctrl.Result{}, nil
+
+		// Update HnMachine status
+		hnMachine.Status.Ready = false
+		hnMachine.Status.FailureReason = nil
+		hnMachine.Status.FailureMessage = nil
+		hnMachine.Status.Phase = "Pending"
+
+		// Requeue after 30 seconds
+		return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 	}
 
 	// Make sure bootstrap data is available and populated.
 	if machine.Spec.Bootstrap.DataSecretName == nil {
 		logger.Info("Waiting for the Bootstrap provider controller to set bootstrap data")
-		return ctrl.Result{}, nil
+		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "WaitingForBootstrapData", clusterv1.ConditionSeverityInfo, "Bootstrap data is not yet available")
+		return ctrl.Result{RequeueAfter: time.Second * 15}, nil
 	}
 
 	// Create or update the container
 	pod, err := r.reconcileContainer(ctx, hnMachine)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile container")
+		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "ReconciliationFailed", clusterv1.ConditionSeverityError, err.Error())
 		return ctrl.Result{}, errors.Wrap(err, "failed to reconcile container")
 	}
 
@@ -174,10 +189,16 @@ func (r *HnMachineReconciler) reconcileNormal(ctx context.Context, hnMachine *hn
 			hnMachine.Spec.ProviderID = r.getProviderID(hnMachine)
 		}
 
+		hnMachine.Status.Phase = "Running"
+		conditions.MarkTrue(hnMachine, hnv1alpha1.ContainerProvisionedCondition)
 		logger.Info("Successfully reconciled HnMachine", "hnMachine", hnMachine.Name, "pod", pod.Name)
 	} else {
 		hnMachine.Status.Ready = false
+		hnMachine.Status.Phase = "Provisioning"
+		conditions.MarkFalse(hnMachine, hnv1alpha1.ContainerProvisionedCondition, "PodNotRunning", clusterv1.ConditionSeverityWarning, fmt.Sprintf("Pod is in %s state", pod.Status.Phase))
 		logger.Info("HnMachine not ready", "hnMachine", hnMachine.Name, "podPhase", pod.Status.Phase)
+		// Requeue to check status again
+		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -307,19 +328,36 @@ func (r *HnMachineReconciler) createPodForHnMachine(ctx context.Context, hnMachi
 		},
 	})
 
+	labels := map[string]string{
+		"app":                      "hnmachine",
+		"hnmachine":                hnMachine.Name,
+		clusterv1.ClusterNameLabel: hnMachine.Spec.ClusterName,
+	}
+
+	annotations := map[string]string{}
+
+	if hnMachine.Spec.FailureDomain != nil {
+		labels["topology.kubernetes.io/zone"] = *hnMachine.Spec.FailureDomain
+	}
+
 	// Pod definition
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      hnMachine.Name,
-			Namespace: hnMachine.Namespace,
-			Labels: map[string]string{
-				"app":       "hnmachine",
-				"hnmachine": hnMachine.Name,
-			},
+			Name:        hnMachine.Name,
+			Namespace:   hnMachine.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{container},
 		},
+	}
+
+	// Add NodeSelector only if FailureDomain is specified
+	if hnMachine.Spec.FailureDomain != nil {
+		pod.Spec.NodeSelector = map[string]string{
+			"topology.kubernetes.io/zone": *hnMachine.Spec.FailureDomain,
+		}
 	}
 
 	// Create the Pod
@@ -392,35 +430,6 @@ func areEnvVarsEqual(a, b []corev1.EnvVar) bool {
 	return reflect.DeepEqual(aMap, bMap)
 }
 
-// Helper function to check if a value change is within the specified tolerance
-func isWithinTolerance(a, b resource.Quantity, tolerance float64) bool {
-	aFloat := float64(a.MilliValue())
-	bFloat := float64(b.MilliValue())
-	if aFloat == 0 && bFloat == 0 {
-		return true
-	}
-	if aFloat == 0 || bFloat == 0 {
-		return false
-	}
-	diff := math.Abs(aFloat - bFloat)
-	average := (aFloat + bFloat) / 2
-	return (diff / average) <= tolerance
-}
-
-// Helper function to convert environment variables to a map
-func makeEnvMap(envVars []corev1.EnvVar) map[string]string {
-	envMap := make(map[string]string)
-	for _, env := range envVars {
-		if env.Value != "" {
-			envMap[env.Name] = env.Value
-		} else if env.ValueFrom != nil {
-			// For ValueFrom, consider it the same if it exists
-			envMap[env.Name] = "VALUE_FROM_PRESENT"
-		}
-	}
-	return envMap
-}
-
 func (r *HnMachineReconciler) updatePod(ctx context.Context, hnMachine *hnv1alpha1.HnMachine, oldPod *corev1.Pod) error {
 	log := log.FromContext(ctx)
 
@@ -433,28 +442,24 @@ func (r *HnMachineReconciler) updatePod(ctx context.Context, hnMachine *hnv1alph
 
 	// 2. Wait for the Pod to be deleted
 	log.Info("Waiting for Pod deletion", "hnMachine", hnMachine.Name, "pod", oldPod.Name)
-	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
-	defer cancel()
 
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, time.Second*30, true, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextTimeout(ctx, time.Second, time.Second*30, true, func(ctx context.Context) (bool, error) {
 		var pod corev1.Pod
 		if err := r.Get(ctx, client.ObjectKey{Namespace: oldPod.Namespace, Name: oldPod.Name}, &pod); err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Info("Pod successfully deleted", "hnMachine", hnMachine.Name, "pod", oldPod.Name)
-				// Pod is deleted, continue with the rest of your logic
 				return true, nil
 			}
-			// An error occurred, but it's not a "not found" error
 			log.Error(err, "Error checking Pod existence", "hnMachine", hnMachine.Name, "pod", oldPod.Name)
 			return false, err
 		}
-		// Pod still exists, continue polling
 		log.V(1).Info("Pod still exists, continuing to wait", "hnMachine", hnMachine.Name, "pod", oldPod.Name)
 		return false, nil
-	}); err != nil {
-		// Handle the error (could be context timeout or other errors)
+	})
+
+	if err != nil {
 		log.Error(err, "Failed to confirm Pod deletion", "hnMachine", hnMachine.Name, "pod", oldPod.Name)
-		return err
+		return fmt.Errorf("failed to confirm Pod deletion: %w", err)
 	}
 
 	// 3. Create a new Pod
@@ -493,10 +498,8 @@ func (r *HnMachineReconciler) deleteContainer(ctx context.Context, hnMachine *hn
 
 	// Wait for the Pod to be deleted
 	log.Info("Waiting for Pod deletion", "hnMachine", hnMachine.Name, "pod", pod.Name)
-	ctx, cancel := context.WithTimeout(ctx, time.Second*30)
-	defer cancel()
 
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, time.Second*30, true, func(ctx context.Context) (bool, error) {
+	err = wait.PollUntilContextTimeout(ctx, time.Second, time.Second*30, true, func(ctx context.Context) (bool, error) {
 		if err := r.Get(ctx, client.ObjectKey{Namespace: pod.Namespace, Name: pod.Name}, &corev1.Pod{}); err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Info("Pod successfully deleted", "hnMachine", hnMachine.Name, "pod", pod.Name)
@@ -507,7 +510,9 @@ func (r *HnMachineReconciler) deleteContainer(ctx context.Context, hnMachine *hn
 		}
 		log.V(1).Info("Pod still exists, continuing to wait", "hnMachine", hnMachine.Name, "pod", pod.Name)
 		return false, nil
-	}); err != nil {
+	})
+
+	if err != nil {
 		log.Error(err, "Failed to confirm Pod deletion", "hnMachine", hnMachine.Name, "pod", pod.Name)
 		return fmt.Errorf("failed to confirm Pod deletion: %w", err)
 	}
@@ -521,9 +526,28 @@ func (r *HnMachineReconciler) getProviderID(hnMachine *hnv1alpha1.HnMachine) *st
 	return &pid
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *HnMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&hnv1alpha1.HnMachine{}).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.podToHnMachine),
+		).
 		Complete(r)
+}
+
+func (r *HnMachineReconciler) podToHnMachine(ctx context.Context, obj client.Object) []reconcile.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	if pod.Labels["app"] != "hnmachine" {
+		return nil
+	}
+	return []reconcile.Request{
+		{NamespacedName: types.NamespacedName{
+			Name:      pod.Labels["hnmachine"],
+			Namespace: pod.Namespace,
+		}},
+	}
 }

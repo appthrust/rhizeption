@@ -35,9 +35,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+
 	hnv1alpha1 "github.com/appthrust/hosted-node/api/v1alpha1"
 	"github.com/appthrust/hosted-node/internal/controller"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -150,6 +151,13 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "HnMachine")
+		os.Exit(1)
+	}
+	if err = (&controller.HnClusterReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "HnCluster")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

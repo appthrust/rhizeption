@@ -7,7 +7,28 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - clusters
+  - clusters/status
   verbs:
   - get
   - list
@@ -21,6 +42,32 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - hn.appthrust.io
+  resources:
+  - hnclusters
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - hn.appthrust.io
+  resources:
+  - hnclusters/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - hn.appthrust.io
+  resources:
+  - hnclusters/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - hn.appthrust.io
   resources:
