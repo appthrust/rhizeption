@@ -300,8 +300,14 @@ func (r *HnClusterReconciler) checkClusterHealth(ctx context.Context, hnCluster 
 		}
 	}
 
-	if readyNodes == 0 {
-		logger.Info("No ready nodes found")
+	// Check if the number of ready nodes matches the expected number
+	expectedNodes := int(*hnCluster.Spec.ControlPlaneConfig.Replicas)
+	if hnCluster.Spec.ControlPlaneConfig != nil && hnCluster.Spec.ControlPlaneConfig.Replicas != nil {
+		expectedNodes += int(*hnCluster.Spec.ControlPlaneConfig.Replicas)
+	}
+
+	if readyNodes < expectedNodes {
+		logger.Info("Not all expected nodes are ready", "readyNodes", readyNodes, "expectedNodes", expectedNodes)
 		return false, nil
 	}
 
@@ -314,6 +320,34 @@ func (r *HnClusterReconciler) checkClusterHealth(ctx context.Context, hnCluster 
 	for _, cs := range componentStatuses.Items {
 		if !isComponentHealthy(&cs) {
 			logger.Info("Component is not healthy", "component", cs.Name)
+			return false, nil
+		}
+	}
+
+	// Check if the control plane endpoint matches the expected value
+	if hnCluster.Spec.ControlPlaneEndpoint != cluster.Spec.ControlPlaneEndpoint {
+		logger.Info("Control plane endpoint mismatch",
+			"expected", hnCluster.Spec.ControlPlaneEndpoint,
+			"actual", cluster.Spec.ControlPlaneEndpoint)
+		return false, nil
+	}
+
+	// Check network configuration
+	if hnCluster.Spec.NetworkConfig != nil {
+		if hnCluster.Spec.NetworkConfig.Pods != nil &&
+			(cluster.Spec.ClusterNetwork.Pods == nil ||
+				cluster.Spec.ClusterNetwork.Pods.CIDRBlocks[0] != *hnCluster.Spec.NetworkConfig.Pods) {
+			logger.Info("Pod network CIDR mismatch",
+				"expected", *hnCluster.Spec.NetworkConfig.Pods,
+				"actual", cluster.Spec.ClusterNetwork.Pods)
+			return false, nil
+		}
+		if hnCluster.Spec.NetworkConfig.Services != nil &&
+			(cluster.Spec.ClusterNetwork.Services == nil ||
+				cluster.Spec.ClusterNetwork.Services.CIDRBlocks[0] != *hnCluster.Spec.NetworkConfig.Services) {
+			logger.Info("Service network CIDR mismatch",
+				"expected", *hnCluster.Spec.NetworkConfig.Services,
+				"actual", cluster.Spec.ClusterNetwork.Services)
 			return false, nil
 		}
 	}
