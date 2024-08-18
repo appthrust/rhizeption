@@ -16,6 +16,21 @@ Rhizeption is an innovative project that implements Hosted Nodes for Kubernetes 
 
 Rhizeption extends the Kubernetes ecosystem by introducing the concept of Hosted Nodes. These nodes are containerized Kubernetes nodes that run within a host Kubernetes cluster, offering a nested and interconnected structure that maximizes resource utilization and operational flexibility.
 
+## The Name: Rhizeption
+The name "Rhizeption" is a clever combination of two concepts that perfectly encapsulate the essence of our project:
+
+1. Rhizome: In botany, a rhizome is a horizontal underground plant stem capable of producing the shoot and root systems of a new plant. Rhizomes are characterized by their ability to spread laterally and form interconnected networks. This reflects our project's nature of creating interconnected, adaptable, and scalable node structures.
+2. Inception: This part of the name alludes to the concept of nested structures or "a dream within a dream," as popularized by the movie "Inception." In our context, it represents the idea of Kubernetes nodes running within a Kubernetes cluster - a nested, inception-like architecture.
+
+The fusion of these two concepts into "Rhizeption" embodies the core principles of our project:
+
+* Interconnectedness and lateral growth (like a rhizome)
+* Nested, inception-like structures (Kubernetes within Kubernetes)
+* Adaptability and scalability
+* Innovative approach to traditional concepts
+
+By choosing this name, we aim to convey the unique and powerful nature of our Hosted Nodes solution, emphasizing its ability to create flexible, interconnected, and nested Kubernetes environments.
+
 ## Hosted Nodes: In-Depth
 
 Hosted Nodes represent a paradigm shift in how we think about and implement Kubernetes clusters. Here's a detailed look at what Hosted Nodes are and how they work:
